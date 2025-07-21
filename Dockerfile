@@ -1,37 +1,42 @@
-FROM node:18-alpine AS builder
-RUN apk add --no-cache libc6-compat openssl openssl-dev python3 make g++
+FROM node:18-alpine AS dependencies
+RUN apk add --no-cache libc6-compat openssl python3 make g++
 WORKDIR /app
+COPY package.json yarn.lock ./
+COPY apps/web/package.json ./apps/web/
+COPY packages/prisma/package.json ./packages/prisma/
+COPY packages/*/package.json ./packages/*/
+RUN yarn install --frozen-lockfile
 
-# Copy everything
+FROM node:18-alpine AS builder
+RUN apk add --no-cache libc6-compat openssl
+WORKDIR /app
+COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
 
-# Install dependencies
-RUN yarn install --frozen-lockfile --network-timeout 600000
-
 # Generate Prisma
-RUN cd packages/prisma && npx prisma generate || true
+RUN npx prisma generate --schema=./packages/prisma/schema.prisma || true
 
-# Build the app
+# Build only what we need
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
-ENV NODE_OPTIONS="--max-old-space-size=6144"
-RUN yarn build
+RUN cd apps/web && npm run build
 
-# Production image
 FROM node:18-alpine AS runner
 RUN apk add --no-cache openssl
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
 
-# Copy the entire built application
-COPY --from=builder /app ./
+# Copy built application
+COPY --from=builder /app/apps/web/.next ./apps/web/.next
+COPY --from=builder /app/apps/web/public ./apps/web/public
+COPY --from=builder /app/apps/web/package.json ./apps/web/
+COPY --from=builder /app/apps/web/next.config.js ./apps/web/
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages ./packages
+COPY --from=builder /app/package.json ./
 
-# The build created everything we need
-EXPOSE 3000
-ENV PORT=3000
-
-# Start from the web directory
 WORKDIR /app/apps/web
+EXPOSE 3000
+
 CMD ["npm", "start"]
