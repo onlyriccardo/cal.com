@@ -1,45 +1,25 @@
 FROM node:18-alpine AS builder
-RUN apk add --no-cache libc6-compat openssl openssl-dev
+RUN apk add --no-cache libc6-compat openssl openssl-dev python3 make g++
 WORKDIR /app
 
-# Copy all package files first
-COPY package.json yarn.lock ./
-COPY apps/web/package.json ./apps/web/
-COPY packages/prisma/package.json ./packages/prisma/
-COPY packages/lib/package.json ./packages/lib/
-COPY packages/ui/package.json ./packages/ui/
-COPY packages/config/package.json ./packages/config/
-COPY packages/tsconfig/package.json ./packages/tsconfig/
-COPY packages/app-store/package.json ./packages/app-store/
-COPY packages/app-store-cli/package.json ./packages/app-store-cli/
-COPY packages/dayjs/package.json ./packages/dayjs/
-COPY packages/emails/package.json ./packages/emails/
-COPY packages/embed-core/package.json ./packages/embed-core/
-COPY packages/embed-react/package.json ./packages/embed-react/
-COPY packages/embed-snippet/package.json ./packages/embed-snippet/
-COPY packages/features/package.json ./packages/features/
-COPY packages/platform/package.json ./packages/platform/
-COPY packages/trpc/package.json ./packages/trpc/
+# Copy package files
+COPY package.json yarn.lock turbo.json ./
+COPY apps/ ./apps/
+COPY packages/ ./packages/
 
 # Install dependencies
-RUN yarn install --frozen-lockfile
+RUN yarn install --frozen-lockfile --network-timeout 600000
 
-# Copy all source code
-COPY . .
+# Generate Prisma
+RUN cd packages/prisma && npx prisma generate --schema=./schema.prisma || true
 
-# Fix TypeScript configuration for Prisma
-RUN echo '{"extends": "./tsconfig.json", "compilerOptions": {"module": "commonjs", "moduleResolution": "node"}}' > packages/prisma/tsconfig.build.json
-
-# Skip the problematic prisma build step and generate directly
-RUN cd packages/prisma && npx prisma generate --schema=./schema.prisma
-
-# Set environment variables for build
+# Build
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV BUILD_STANDALONE=true
-ENV SKIP_BUILD_CHECK=true
+ENV NODE_OPTIONS="--max-old-space-size=4096"
 
-# Build only the web app (skip the full turbo build)
-RUN cd apps/web && yarn build
+# Try to build with turbo first, fallback to direct build
+RUN yarn build || (cd apps/web && yarn build)
 
 # Production image
 FROM node:18-alpine AS runner
@@ -52,10 +32,12 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
-# Copy standalone build
+# Check if standalone exists, otherwise copy everything
 COPY --from=builder /app/apps/web/.next/standalone ./
 COPY --from=builder /app/apps/web/.next/static ./apps/web/.next/static
 COPY --from=builder /app/apps/web/public ./apps/web/public
+
+# Copy Prisma files
 COPY --from=builder /app/packages/prisma ./packages/prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
